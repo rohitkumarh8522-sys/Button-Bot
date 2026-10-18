@@ -1,6 +1,13 @@
 import asyncio
-import logging
 import os
+import logging
+
+# Event loop fix for Python 3.14 / Render environment before pyrogram import
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from threading import Thread
 from flask import Flask
 from pyrogram import Client, filters, idle
@@ -198,7 +205,7 @@ async def wizard_handler(client: Client, message: Message):
         
         if user_id not in scheduled_jobs:
             scheduled_jobs[user_id] = []
-        scheduled_jobs.append({"job_id": job.id, "interval": interval})
+        scheduled_jobs[user_id].append({"job_id": job.id, "interval": interval})
         
         del user_wizard[user_id]
         
