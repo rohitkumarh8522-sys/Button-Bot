@@ -1,10 +1,10 @@
 import os
 import logging
+import re
 from threading import Thread
 from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,172 +19,178 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app_flask.run(host="0.0.0.0", port=port)
 
-# --- Telegram Bot Setup ---
+# --- Telegram Bot Configurations ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 bot = telebot.TeleBot(BOT_TOKEN)
-scheduler = BackgroundScheduler()
-scheduler.start()
 
-user_wizard = {}
-scheduled_jobs = {}
+# Storage Databases (In-Memory)
+groups_db = set()  # Set of chat IDs where bot is added
+trigger_buttons = {} # {chat_id: {word: {"text": str, "buttons": [(name, url)]}}}
 
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    if message.chat.type != 'private':
+def is_group_admin(chat_id, user_id):
+    try:
+        member = bot.get_chat_member(chat_id, user_id)
+        return member.status in ['administrator', 'creator']
+    except Exception:
+        return False
+
+# Track groups when bot receives messages
+@bot.message_handler(func=lambda message: message.chat.type in ['group', 'supergroup'])
+def track_and_process_groups(message):
+    chat_id = message.chat.id
+    groups_db.add(chat_id)
+    
+    # Check if message contains trigger word
+    text = message.text or message.caption
+    if not text or text.startswith('/'):
         return
-    
-    user_id = message.from_user.id
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("➕ Create Scheduled Post", callback_data="create_post"))
-    markup.add(InlineKeyboardButton("📋 My Active Posts", callback_data="view_posts"))
-    
-    if user_id == OWNER_ID:
-        markup.add(InlineKeyboardButton("👑 Owner Panel", callback_data="owner_panel"))
-        
-    bot.send_message(
-        message.chat.id,
-        "👋 **Welcome to Group Auto-Poster Bot!**\n\n"
-        "Aap is bot ki madad se apne group me scheduled posts set kar sakte hain.",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    user_id = call.from_user.id
-    
-    if call.data == "create_post":
-        user_wizard[user_id] = {"step": "waiting_for_message"}
-        bot.edit_message_text(
-            "📷 **Step 1:** Apne message ka text bhejiye (Agar image ke sath bhejna hai toh image + caption ek sath bhejiye).",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            parse_mode="Markdown"
-        )
-    
-    elif call.data == "view_posts":
-        jobs = scheduled_jobs.get(user_id, [])
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🔙 Back", callback_data="back_home"))
-        
-        if not jobs:
-            bot.edit_message_text(
-                "❌ Aapka koi bhi scheduled post active nahi hai.",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=markup
-            )
-        else:
-            text = "📋 **Aapke Active Scheduled Posts:**\n\n"
-            for i, job in enumerate(jobs):
-                text += f"{i+1}. Interval: har {job['interval']} minutes me\n"
-            bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-            
-    elif call.data == "owner_panel":
-        if user_id != OWNER_ID:
-            bot.answer_callback_query(call.id, "⚠️ Yeh sirf bot owner ke liye hai!", show_alert=True)
-            return
-        
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🔙 Back", callback_data="back_home"))
-        total_users_posts = sum(len(v) for v in scheduled_jobs.values())
-        bot.edit_message_text(
-            f"👑 **Owner Control Panel**\n\n• Total Active Scheduled Jobs: {total_users_posts}\n• Bot Status: Running ✅",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-        
-    elif call.data == "back_home":
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("➕ Create Scheduled Post", callback_data="create_post"))
-        markup.add(InlineKeyboardButton("📋 My Active Posts", callback_data="view_posts"))
-        if user_id == OWNER_ID:
-            markup.add(InlineKeyboardButton("👑 Owner Panel", callback_data="owner_panel"))
-        bot.edit_message_text(
-            "👋 **Main Menu:**",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+    text_lower = text.strip().lower()
+    chat_triggers = trigger_buttons.get(chat_id, {})
 
-@bot.message_handler(func=lambda message: message.chat.type == 'private', content_types=['text', 'photo'])
-def wizard_handler(message):
-    user_id = message.from_user.id
-    if user_id not in user_wizard:
+    if text_lower in chat_triggers:
+        data = chat_triggers[text_lower]
+        reply_text = data["text"]
+        buttons = data["buttons"]
+
+        markup = InlineKeyboardMarkup()
+        for btn_name, btn_url in buttons:
+            markup.add(InlineKeyboardButton(text=btn_name, url=btn_url))
+
+        try:
+            bot.reply_to(message, reply_text, reply_markup=markup, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Error sending button reply: {e}")
+
+# --- BOT OWNER COMMANDS ---
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_command(message):
+    if message.from_user.id != OWNER_ID:
         return
-    
-    state = user_wizard[user_id].get("step")
-    
-    if state == "waiting_for_message":
-        user_wizard[user_id]["media_message"] = message
-        user_wizard[user_id]["step"] = "waiting_for_buttons"
+
+    # Check if replying to a message or has text
+    reply_msg = message.reply_to_message
+    broadcast_text = message.text.replace('/broadcast', '').strip()
+
+    if not reply_msg and not broadcast_text:
+        bot.reply_to(message, "⚠️ **उपयोग:** `/broadcast [मैसेज]` या किसी मैसेज/फोटो को रिप्लाई करके `/broadcast` लिखें।", parse_mode="Markdown")
+        return
+
+    success = 0
+    failed = 0
+
+    for group_id in list(groups_db):
+        try:
+            if reply_msg:
+                bot.copy_message(chat_id=group_id, from_chat_id=reply_msg.chat.id, message_id=reply_msg.message_id)
+            else:
+                bot.send_message(chat_id=group_id, text=broadcast_text, parse_mode="Markdown")
+            success += 1
+        except Exception:
+            failed += 1
+
+    bot.reply_to(message, f"📢 **ब्रोडकास्ट समाप्त!**\n\n✅ सफल: {success} ग्रुप्स\n❌ असफल: {failed} ग्रुप्स")
+
+@bot.message_handler(commands=['groups'])
+def groups_list_command(message):
+    if message.from_user.id != OWNER_ID:
+        return
+
+    if not groups_db:
+        bot.reply_to(message, "❌ बोट अभी किसी भी ग्रुप में नहीं जुड़ा है।")
+        return
+
+    response = "📋 **बोट जिन ग्रुप्स में एक्टिव है:**\n\n"
+    count = 1
+
+    for group_id in list(groups_db):
+        try:
+            chat = bot.get_chat(group_id)
+            title = chat.title
+            invite_link = chat.invite_link or "लिंक उपलब्ध नहीं है"
+            response += f"{count}. **{title}**\n🆔 ID: `{group_id}`\n🔗 Link: {invite_link}\n\n"
+            count += 1
+        except Exception:
+            response += f"{count}. **Group ID:** `{group_id}` (जानकारी लोड नहीं हो सकी)\n\n"
+            count += 1
+
+    bot.reply_to(message, response, parse_mode="Markdown", disable_web_page_preview=True)
+
+# --- GROUP ADMIN COMMANDS ---
+
+@bot.message_handler(commands=['button'])
+def add_button_command(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.reply_to(message, "⚠️ यह कमांड सिर्फ ग्रुप के अंदर काम करेगी!")
+        return
+
+    if not is_group_admin(message.chat.id, message.from_user.id):
+        bot.reply_to(message, "⚠️ यह कमांड सिर्फ ग्रुप एडमिन ही यूज़ कर सकते हैं!")
+        return
+
+    content = message.text.replace('/button', '', 1).strip()
+    if not content:
         bot.reply_to(
             message,
-            "🔘 **Step 2:** Ab buttons bhejiye is format me:\n\n`Button Name - https://t.me/...`\n`Button 2 - https://example.com`\n\n(Har button ko nayi line me likhein. Agar button nahi chahiye toh `skip` likhein)",
+            "⚠️ **फॉर्मेट सही नहीं है!**\n\n"
+            "**उदाहरण:**\n"
+            "`/button dm 𝐉𝐎𝐈𝐍 𝐍𝐎𝐖 📌 [1. 𝗜𝗻𝗝𝗢𝗬 ❤️](buttonurl:https://t.me/link1) [2. 𝗖𝗢𝗨𝗣𝗟𝗘 🌽](buttonurl:https://t.me/link2)`",
             parse_mode="Markdown"
         )
-        
-    elif state == "waiting_for_buttons":
-        btn_text = message.text
-        markup = InlineKeyboardMarkup()
-        
-        if btn_text and btn_text.lower() != "skip":
-            lines = btn_text.split("\n")
-            for line in lines:
-                if "-" in line:
-                    parts = line.split("-")
-                    b_name = parts[0].strip()
-                    b_url = parts[1].strip()
-                    markup.add(InlineKeyboardButton(b_name, url=b_url))
-                    
-        user_wizard[user_id]["reply_markup"] = markup if len(markup.keyboard) > 0 else None
-        user_wizard[user_id]["step"] = "waiting_for_chat"
-        bot.reply_to(message, "📢 **Step 3:** Us Group ka **Username** (jaise `@mygroup`) ya **Group Chat ID** bhejiye jahan message bhejna hai.", parse_mode="Markdown")
-        
-    elif state == "waiting_for_chat":
-        user_wizard[user_id]["chat_id"] = message.text.strip()
-        user_wizard[user_id]["step"] = "waiting_for_time"
-        bot.reply_to(message, "⏱️ **Step 4:** Time interval set karein (Minutes me, jaise: `30`)", parse_mode="Markdown")
-        
-    elif state == "waiting_for_time":
-        try:
-            interval = int(message.text.strip())
-        except ValueError:
-            bot.reply_to(message, "❌ Kripya valid number dalein (jaise: 15, 30, 60).")
-            return
-            
-        data = user_wizard[user_id]
-        chat_id = data["chat_id"]
-        media_msg = data["media_message"]
-        reply_markup = data["reply_markup"]
-        
-        def send_scheduled_msg():
-            try:
-                if media_msg.photo:
-                    photo_id = media_msg.photo[-1].file_id
-                    bot.send_photo(chat_id, photo_id, caption=media_msg.caption or "", reply_markup=reply_markup)
-                else:
-                    bot.send_message(chat_id, media_msg.text or "", reply_markup=reply_markup)
-            except Exception as e:
-                logging.error(f"Error: {e}")
+        return
 
-        job = scheduler.add_job(send_scheduled_msg, "interval", minutes=interval)
-        
-        if user_id not in scheduled_jobs:
-            scheduled_jobs[user_id] = []
-        scheduled_jobs[user_id].append({"job_id": job.id, "interval": interval})
-        
-        del user_wizard[user_id]
-        bot.reply_to(message, f"✅ **Success!** Har {interval} minutes me message target group par auto-send hoga!", parse_mode="Markdown")
+    parts = content.split(maxsplit=1)
+    word = parts[0].lower()
+    rest = parts[1] if len(parts) > 1 else ""
+
+    # Extract buttons using pattern (buttonurl:link)
+    button_pattern = r'\[(.*?)\]\(buttonurl:(.*?)\)'
+    raw_buttons = re.findall(button_pattern, rest)
+
+    # Remove button markup from response text
+    clean_text = re.sub(button_pattern, '', rest).strip()
+
+    if not raw_buttons:
+        bot.reply_to(message, "❌ बटन फॉर्मेट गलत है! बटन के लिए `[नाम](buttonurl:लिंक)` का यूज़ करें।")
+        return
+
+    chat_id = message.chat.id
+    if chat_id not in trigger_buttons:
+        trigger_buttons[chat_id] = {}
+
+    trigger_buttons[chat_id][word] = {
+        "text": clean_text,
+        "buttons": raw_buttons
+    }
+
+    bot.reply_to(message, f"✅ **सफलतापूर्वक सेट हो गया!**\n\nअब जब भी कोई ग्रुप में `{word}` लिखेगा, तो यह मैसेज और बटन्स ऑटो-रिप्लाई हो जाएंगे।", parse_mode="Markdown")
+
+@bot.message_handler(commands=['buttons'])
+def list_buttons_command(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.reply_to(message, "⚠️ यह कमांड सिर्फ ग्रुप के अंदर काम करेगी!")
+        return
+
+    chat_id = message.chat.id
+    chat_triggers = trigger_buttons.get(chat_id, {})
+
+    if not chat_triggers:
+        bot.reply_to(message, "❌ इस ग्रुप में अभी कोई ट्रिगर वर्ड या बटन सेट नहीं है।")
+        return
+
+    text = "📋 **इस ग्रुप के एक्टिव ट्रिगर वर्ड्स:**\n\n"
+    for i, (word, data) in enumerate(chat_triggers.items(), 1):
+        btn_count = len(data["buttons"])
+        text += f"{i}. **वर्ड:** `{word}` ({btn_count} बटन्स शामिल हैं)\n"
+
+    bot.reply_to(message, text, parse_mode="Markdown")
 
 if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     
-    print("🤖 Bot Started Successfully with Telebot!")
-    bot.infinity_polling()
+    print("🤖 Custom Trigger Bot Started Successfully!")
+    bot.infinity_polling() ka 
