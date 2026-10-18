@@ -2,7 +2,7 @@ import asyncio
 import os
 import logging
 
-# Event loop fix for Python 3.14 / Render environment before pyrogram import
+# Event loop fix for Render environment
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -21,7 +21,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 logging.basicConfig(level=logging.INFO)
 
-# --- Flask Server for Render Web Service Port Binding ---
+# --- Flask Server for Render ---
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -32,11 +32,11 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app_flask.run(host="0.0.0.0", port=port)
 
-# --- Telegram Bot Configurations ---
-API_ID = int(os.environ.get("API_ID", "123456"))
-API_HASH = os.environ.get("API_HASH", "your_api_hash")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
-OWNER_ID = int(os.environ.get("OWNER_ID", "123456789"))
+# --- Fetch Credentials from Render Environment Variables ---
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+OWNER_ID = int(os.environ.get("OWNER_ID"))
 
 app = Client(
     "group_scheduler_bot",
