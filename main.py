@@ -183,7 +183,6 @@ def wizard_handler(message):
         bot.reply_to(message, f"✅ **Success!** Har {interval} minutes me message target group par auto-send hoga!", parse_mode="Markdown")
 
 if __name__ == "__main__":
-    # Start Flask server in background thread
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     
