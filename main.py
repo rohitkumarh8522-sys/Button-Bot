@@ -3,7 +3,7 @@ import logging
 import os
 from threading import Thread
 from flask import Flask
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -198,7 +198,7 @@ async def wizard_handler(client: Client, message: Message):
         
         if user_id not in scheduled_jobs:
             scheduled_jobs[user_id] = []
-        scheduled_jobs[user_id].append({"job_id": job.id, "interval": interval})
+        scheduled_jobs.append({"job_id": job.id, "interval": interval})
         
         del user_wizard[user_id]
         
@@ -207,10 +207,14 @@ async def wizard_handler(client: Client, message: Message):
             f"Har {interval} minutes me message target group par auto-send hoga!"
         )
 
-if __name__ == "__main__":
-    # Start Flask web server in a separate thread so Render Web Service accepts the port
+async def main():
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     
     scheduler.start()
-    app.run()
+    await app.start()
+    print("🤖 Bot Started Successfully!")
+    await idle()
+
+if __name__ == "__main__":
+    asyncio.run(main())
