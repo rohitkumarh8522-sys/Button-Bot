@@ -25,9 +25,8 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Storage Databases (In-Memory)
-groups_db = set()  # Set of chat IDs where bot is added
-trigger_buttons = {} # {chat_id: {word: {"text": str, "buttons": [(name, url)]}}}
+groups_db = set()
+trigger_buttons = {}
 
 def is_group_admin(chat_id, user_id):
     try:
@@ -36,35 +35,15 @@ def is_group_admin(chat_id, user_id):
     except Exception:
         return False
 
-# Track groups when bot receives messages
-@bot.message_handler(func=lambda message: message.chat.type in ['group', 'supergroup'])
-def track_and_process_groups(message):
-    chat_id = message.chat.id
-    groups_db.add(chat_id)
-    
-    # Check if message contains trigger word
-    text = message.text or message.caption
-    if not text or text.startswith('/'):
+# ==========================================
+# 1. COMMAND HANDLERS (सबसे ऊपर रखे गए हैं)
+# ==========================================
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    if message.chat.type != 'private':
         return
-
-    text_lower = text.strip().lower()
-    chat_triggers = trigger_buttons.get(chat_id, {})
-
-    if text_lower in chat_triggers:
-        data = chat_triggers[text_lower]
-        reply_text = data["text"]
-        buttons = data["buttons"]
-
-        markup = InlineKeyboardMarkup()
-        for btn_name, btn_url in buttons:
-            markup.add(InlineKeyboardButton(text=btn_name, url=btn_url))
-
-        try:
-            bot.reply_to(message, reply_text, reply_markup=markup, parse_mode="Markdown")
-        except Exception as e:
-            logging.error(f"Error sending button reply: {e}")
-
-# --- BOT OWNER COMMANDS ---
+    bot.reply_to(message, "👋 Welcome! Bot is active and running.")
 
 @bot.message_handler(commands=['broadcast'])
 def broadcast_command(message):
@@ -75,12 +54,11 @@ def broadcast_command(message):
     broadcast_text = message.text.replace('/broadcast', '').strip()
 
     if not reply_msg and not broadcast_text:
-        bot.reply_to(message, "⚠️ **Format:** `/broadcast [message]` ya message ko reply karke `/broadcast` likho.", parse_mode="Markdown")
+        bot.reply_to(message, "⚠️ Format: `/broadcast [message]`", parse_mode="Markdown")
         return
 
     success = 0
     failed = 0
-
     for group_id in list(groups_db):
         try:
             if reply_msg:
@@ -91,7 +69,7 @@ def broadcast_command(message):
         except Exception:
             failed += 1
 
-    bot.reply_to(message, f"📢 **Broadcast Complete!**\n\n✅ Success: {success} groups\n❌ Failed: {failed} groups")
+    bot.reply_to(message, f"📢 Broadcast Complete!\n✅ Success: {success}\n❌ Failed: {failed}")
 
 @bot.message_handler(commands=['groups'])
 def groups_list_command(message):
@@ -99,12 +77,11 @@ def groups_list_command(message):
         return
 
     if not groups_db:
-        bot.reply_to(message, "❌ Bot abhi kisi bhi group me active nahi hai.")
+        bot.reply_to(message, "❌ Bot kisi bhi group me active nahi hai.")
         return
 
     response = "📋 **Groups List:**\n\n"
     count = 1
-
     for group_id in list(groups_db):
         try:
             chat = bot.get_chat(group_id)
@@ -118,10 +95,9 @@ def groups_list_command(message):
 
     bot.reply_to(message, response, parse_mode="Markdown", disable_web_page_preview=True)
 
-# --- GROUP ADMIN COMMANDS ---
-
 @bot.message_handler(commands=['button'])
 def add_button_command(message):
+    groups_db.add(message.chat.id)
     if message.chat.type not in ['group', 'supergroup']:
         bot.reply_to(message, "⚠️ Ye command sirf group me chalegi!")
         return
@@ -135,7 +111,7 @@ def add_button_command(message):
         bot.reply_to(
             message,
             "⚠️ **Format Example:**\n\n"
-            "`/button dm JOIN NOW 📌 [1. ENJOY ❤️](buttonurl:https://t.me/link1) [2. COUPLE 🌽](buttonurl:https://t.me/link2)`",
+            "`/button dm JOIN NOW 📌 [1. ENJOY ❤️](buttonurl:https://t.me/link1)`",
             parse_mode="Markdown"
         )
         return
@@ -149,7 +125,7 @@ def add_button_command(message):
     clean_text = re.sub(button_pattern, '', rest).strip()
 
     if not raw_buttons:
-        bot.reply_to(message, "❌ Button format galat hai! Use karein: `[Name](buttonurl:Link)`")
+        bot.reply_to(message, "❌ Button format galat hai! Use karein: `[Name](buttonurl:Link)`", parse_mode="Markdown")
         return
 
     chat_id = message.chat.id
@@ -165,6 +141,7 @@ def add_button_command(message):
 
 @bot.message_handler(commands=['buttons'])
 def list_buttons_command(message):
+    groups_db.add(message.chat.id)
     if message.chat.type not in ['group', 'supergroup']:
         bot.reply_to(message, "⚠️ Ye command sirf group me chalegi!")
         return
@@ -183,9 +160,35 @@ def list_buttons_command(message):
 
     bot.reply_to(message, text, parse_mode="Markdown")
 
+# ==========================================
+# 2. GENERAL GROUP MESSAGE HANDLER (सबसे नीचे)
+# ==========================================
+
+@bot.message_handler(func=lambda message: message.chat.type in ['group', 'supergroup'] and message.text and not message.text.startswith('/'))
+def process_group_triggers(message):
+    chat_id = message.chat.id
+    groups_db.add(chat_id)
+    
+    text_lower = message.text.strip().lower()
+    chat_triggers = trigger_buttons.get(chat_id, {})
+
+    if text_lower in chat_triggers:
+        data = chat_triggers[text_lower]
+        reply_text = data["text"]
+        buttons = data["buttons"]
+
+        markup = InlineKeyboardMarkup()
+        for btn_name, btn_url in buttons:
+            markup.add(InlineKeyboardButton(text=btn_name, url=btn_url))
+
+        try:
+            bot.reply_to(message, reply_text, reply_markup=markup, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Error sending button reply: {e}")
+
 if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     
-    print("🤖 Custom Trigger Bot Started Successfully!")
+    print("🤖 Bot Started Successfully with Fixed Handlers!")
     bot.infinity_polling()
